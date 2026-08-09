@@ -180,6 +180,8 @@ struct ConvertTritonMetalGPUToLLVM
         typeConverter, targetInfo, patterns, benefit);
     metal::populateSimdgroupAsyncCopyOpToLLVMPatterns(typeConverter, patterns,
                                                       targetInfo, benefit);
+    metal::populateDotOpToLLVMPatterns(typeConverter, patterns,
+                                       axisInfoAnalysis, dotAllocOps, targetInfo, benefit);
     metal::populateSimdgroupWaitOpToLLVMPatterns(typeConverter, patterns,
                                                  targetInfo, benefit);
     metal::populateSimdgroupMMAOpToLLVMPatterns(typeConverter, patterns,

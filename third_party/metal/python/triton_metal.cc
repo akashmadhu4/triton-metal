@@ -19,14 +19,11 @@ void init_triton_metal_passes_ttgpuir(py::module &&m) {
   m.def("add_to_llvmir", [](mlir::PassManager &pm, const std::string &arch) {
     pm.addPass(mlir::triton::createConvertTritonMetalGPUToLLVMPass(arch));
   });
-  // m.def("add_accelerate_matmul", [](mlir::PassManager &pm) {
-  //   pm.addPass(mlir::createTritonMetalGPUAccelerateMatmul());
-  // });
+  m.def("add_accelerate_matmul", [](mlir::PassManager &pm) {
+    pm.addPass(mlir::triton::createTritonMetalGPUAccelerateMatmul());
+  });
   m.def("add_inject_tensor_stride_args", [](mlir::PassManager &pm) {
     pm.addPass(mlir::createTritonMetalGPUInjectTensorStrideArgs());
-  });
-  m.def("add_prepare_simdgroup_matmul", [](mlir::PassManager &pm) {
-    pm.addPass(mlir::createTritonMetalGPUPrepareSimdgroupMatmul());
   });
 }
 
@@ -156,14 +153,14 @@ void addAirKernelMetadata(llvm::Module *mod) {
     llvmIdentMD->addOperand(MDNode::get(ctx, identMD));
   }
 
-  // air.version = !{i32 2, i32 7, i32 0}
+  // air.version = !{i32 2, i32 8, i32 0}
   {
     auto *airVersionMD = mod->getOrInsertNamedMetadata("air.version");
     SmallVector<Metadata *> versionMD;
     versionMD.push_back(
         ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(ctx), 2)));
     versionMD.push_back(
-        ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(ctx), 7)));
+        ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(ctx), 8)));
     versionMD.push_back(
         ConstantAsMetadata::get(ConstantInt::get(Type::getInt32Ty(ctx), 0)));
     airVersionMD->addOperand(MDNode::get(ctx, versionMD));

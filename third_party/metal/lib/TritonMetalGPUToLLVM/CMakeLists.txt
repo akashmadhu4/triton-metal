@@ -1,4 +1,5 @@
 add_triton_library(TritonMetalGPUToLLVM
+    AccelerateMetalMatmul.cpp
     FuncOpToLLVM.cpp
     MembarUtility.cpp
     MemoryOpToLLVM.cpp

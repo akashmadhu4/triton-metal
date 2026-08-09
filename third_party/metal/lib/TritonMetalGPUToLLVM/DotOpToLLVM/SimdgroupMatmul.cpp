@@ -447,4 +447,85 @@ LogicalResult convertSimdgroupMatmul(
 
   return helper.convertDot(op, adaptor);
 }
+
+LogicalResult convertMetalMfmaDot(
+    triton::DotOp op, triton::DotOp::Adaptor adaptor,
+    const LLVMTypeConverter *typeConverter, ConversionPatternRewriter &rewriter) {
+  auto loc = op.getLoc();
+  auto *ctx = op.getContext();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+
+  auto aTensorTy = cast<RankedTensorType>(op.getA().getType());
+  auto dTensorTy = cast<RankedTensorType>(op.getResult().getType());
+
+  auto aElems = unpackLLElements(loc, adaptor.getA(), rewriter);
+  auto bElems = unpackLLElements(loc, adaptor.getB(), rewriter);
+  auto cElems = unpackLLElements(loc, adaptor.getC(), rewriter);
+
+  auto dEncoding = cast<MetalMfmaEncodingAttr>(dTensorTy.getEncoding());
+
+  auto warpsPerCTA = dEncoding.getWarpsPerCTA();
+  int repsM = std::max<int>(1, dTensorTy.getShape()[0] / (warpsPerCTA[0] * 8));
+  int repsN = std::max<int>(1, dTensorTy.getShape()[1] / (warpsPerCTA[1] * 8));
+  int repsK = std::max<int>(1, aTensorTy.getShape()[1] / 8); 
+
+  Type aElemTy = aTensorTy.getElementType();
+  Type bElemTy = cast<RankedTensorType>(op.getB().getType()).getElementType();
+  Type dElemTy = dTensorTy.getElementType();
+  
+  VectorType vec64Ty = VectorType::get({64}, dElemTy);
+  VectorType vec64TyA = VectorType::get({64}, aElemTy);
+  VectorType vec64TyB = VectorType::get({64}, bElemTy);
+
+  std::string inSuffix = getElemSuffix(aElemTy);
+  std::string outSuffix = getElemSuffix(dElemTy);
+  std::string funcName = "air.simdgroup_matrix_8x8_multiply_accumulate.v64" +
+                    outSuffix + ".v64" + inSuffix + ".v64" + inSuffix + ".v64" +
+                    outSuffix;
+                    
+  auto funcType = LLVM::LLVMFunctionType::get(
+    typeConverter->convertType(vec64Ty),
+    {typeConverter->convertType(vec64TyA), typeConverter->convertType(vec64TyB), typeConverter->convertType(vec64Ty)}
+  );
+  Operation *parentOp = rewriter.getInsertionBlock()->getParentOp();
+  auto funcOp = getOrCreateSimdgroupFunc(rewriter, parentOp, funcName, funcType);
+
+  SmallVector<Value> dElems(cElems.size());
+  
+  for (int m = 0; m < repsM; ++m) {
+    for (int n = 0; n < repsN; ++n) {
+      Value accVec = b.undef(vec64Ty);
+      for (int r = 0; r < 2; ++r) {
+        int cIdx = r + 2 * (n + repsN * m);
+        accVec = LLVM::InsertElementOp::create(rewriter, loc, typeConverter->convertType(vec64Ty), accVec, cElems[cIdx], b.i32_val(r));
+      }
+      
+      for (int k = 0; k < repsK; ++k) {
+        Value aVec = b.undef(vec64TyA);
+        for (int r = 0; r < 2; ++r) {
+          int aIdx = r + 2 * (k + repsK * m);
+          aVec = LLVM::InsertElementOp::create(rewriter, loc, typeConverter->convertType(vec64TyA), aVec, aElems[aIdx], b.i32_val(r));
+        }
+        
+        Value bVec = b.undef(vec64TyB);
+        for (int r = 0; r < 2; ++r) {
+          int bIdx = r + 2 * (n + repsN * k);
+          bVec = LLVM::InsertElementOp::create(rewriter, loc, typeConverter->convertType(vec64TyB), bVec, bElems[bIdx], b.i32_val(r));
+        }
+        
+        accVec = LLVM::createLLVMCallOp(rewriter, loc, funcOp, ValueRange{aVec, bVec, accVec}).getResult();
+      }
+      
+      for (int r = 0; r < 2; ++r) {
+        int cIdx = r + 2 * (n + repsN * m);
+        dElems[cIdx] = LLVM::ExtractElementOp::create(rewriter, loc, typeConverter->convertType(dElemTy), accVec, b.i32_val(r));
+      }
+    }
+  }
+
+  Value result = packLLElements(loc, typeConverter, dElems, rewriter, dTensorTy);
+  rewriter.replaceOp(op, result);
+  return success();
+}
+
 } // namespace mlir::triton::metal

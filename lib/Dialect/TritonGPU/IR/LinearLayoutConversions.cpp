@@ -312,6 +312,60 @@ static LinearLayout broadcastedDotOperandLayout(MLIRContext *ctx,
 }
 
 LinearLayout
+MetalMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
+  MLIRContext *ctx = getContext();
+  int rank = shape.size();
+  assert(rank == 2 && "MetalMfmaEncodingAttr only supports 2D tensors");
+
+  SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, rank);
+  StringAttr dimM = outDimNames[0];
+  StringAttr dimN = outDimNames[1];
+
+  StringAttr kRegister = S("register");
+  StringAttr kLane = S("lane");
+  StringAttr kWarp = S("warp");
+
+  // Metal 8x8 Tile Mapping for simdgroup_matrix:
+  // row = (lane % 8) / 2 + (lane / 16) * 4
+  // col = (lane % 2) * 2 + ((lane / 8) % 2) * 4 + reg
+
+  LinearLayout::BasesT bases;
+  bases[kRegister] = {
+      {0, 1} // reg bit 0 maps to dimN (col)
+  };
+  bases[kLane] = {
+      {0, 2}, // lane bit 0 maps to dimN += 2
+      {1, 0}, // lane bit 1 maps to dimM += 1
+      {2, 0}, // lane bit 2 maps to dimM += 2
+      {0, 4}, // lane bit 3 maps to dimN += 4
+      {4, 0}  // lane bit 4 maps to dimM += 4
+  };
+
+  LinearLayout tileLayout(bases, {dimM, dimN});
+
+  // Expand to Multiple Tiles per Warp
+  int numWarpsM = getWarpsPerCTA()[0];
+  int numWarpsN = getWarpsPerCTA()[1];
+  int shapePerWarpM = shape[0] / numWarpsM;
+  int shapePerWarpN = shape[1] / numWarpsN;
+
+  int repsM = std::max(1, shapePerWarpM / 8);
+  int repsN = std::max(1, shapePerWarpN / 8);
+
+  // Distribute remaining tiles across kRegister
+  tileLayout *= LinearLayout::identity1D(repsN, kRegister, dimN);
+  tileLayout *= LinearLayout::identity1D(repsM, kRegister, dimM);
+
+  // Distribute warps according to warpsPerCTA
+  auto warpOrder = getMatrixOrder(rank, /*rowMajor=*/true);
+  tileLayout *=
+      identityStandardND(kWarp, getWarpsPerCTA(), warpOrder)
+          .transposeOuts(llvm::to_vector(tileLayout.getOutDimNames()));
+
+  return combineCtaCgaWithShape(tileLayout, getCGALayout(), shape);
+}
+
+LinearLayout
 AMDMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   int rank = shape.size();
   assert(rank == getRank());
@@ -571,6 +625,87 @@ chooseDotDsReadTrLayout(DotOperandEncodingAttr dotMfmaLayout,
   LinearLayout ctaLayout = tileLayout.transposeOuts(outDimNames) *
                            warpLayout.transposeOuts(outDimNames);
   return combineCtaCgaWithShape(ctaLayout, mfmaLayout.getCGALayout(), shape);
+}
+
+LinearLayout metalMfmaDotToLinearLayout(ArrayRef<int64_t> shape,
+                                        DotOperandEncodingAttr dot) {
+  auto mma = mlir::cast<MetalMfmaEncodingAttr>(dot.getParent());
+  MLIRContext *ctx = dot.getContext();
+  int rank = shape.size();
+  assert(rank == 2 && "DotOperand for MetalMfma only supports 2D");
+
+  SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, rank);
+  StringAttr dim0 = outDimNames[0]; // M for A, K for B
+  StringAttr dim1 = outDimNames[1]; // K for A, N for B
+
+  StringAttr kRegister = S("register");
+  StringAttr kLane = S("lane");
+  StringAttr kWarp = S("warp");
+
+  // True Metal 8x8 Tile Mapping for simdgroup_matrix:
+  // row = (lane % 8) / 2 + (lane / 16) * 4
+  // col = (lane % 2) * 2 + ((lane / 8) % 2) * 4 + reg
+  // So dim0 (row) gets: base1=0, base2=1, base4=2, base8=0, base16=4
+  // And dim1 (col) gets: base1=2, base2=0, base4=0, base8=4, base16=0
+
+  // For reg (size 2):
+  // dim0 (row) gets 0
+  // dim1 (col) gets 1 (base1=1)
+
+  LinearLayout::BasesT bases;
+  bases[kRegister] = {
+      {0, 1} // reg bit 0 maps to dim1 (col)
+  };
+  bases[kLane] = {
+      {0, 2}, // lane bit 0 maps to dim1 += 2
+      {1, 0}, // lane bit 1 maps to dim0 += 1
+      {2, 0}, // lane bit 2 maps to dim0 += 2
+      {0, 4}, // lane bit 3 maps to dim1 += 4
+      {4, 0}  // lane bit 4 maps to dim0 += 4
+  };
+
+  LinearLayout tileLayout(bases, {dim0, dim1});
+
+  // For A (opIdx=0): M is dim0, K is dim1
+  // For B (opIdx=1): K is dim0, N is dim1
+  // warpsPerCTA is [warpsM, warpsN].
+  // warpsM partitions M (dim0 of A).
+  // warpsN partitions N (dim1 of B).
+  ArrayRef<unsigned> warpsPerCTA = mma.getWarpsPerCTA();
+  int opIdx = dot.getOpIdx();
+  int numWarps0 = (opIdx == 0) ? warpsPerCTA[0] : 1;
+  int numWarps1 = (opIdx == 0) ? 1 : warpsPerCTA[1];
+
+  int shapePerWarp0 = shape[0] / numWarps0;
+  int shapePerWarp1 = shape[1] / numWarps1;
+
+  int reps0 = std::max(1, shapePerWarp0 / 8);
+  int reps1 = std::max(1, shapePerWarp1 / 8);
+
+  // Distribute remaining tiles across kRegister
+  tileLayout *= LinearLayout::identity1D(reps1, kRegister, dim1);
+  tileLayout *= LinearLayout::identity1D(reps0, kRegister, dim0);
+
+  // Distribute warps
+  auto warpOrder = getMatrixOrder(rank, /*rowMajor=*/true);
+  LinearLayout warpLayout = LinearLayout::empty();
+  for (int i = 0; i < rank; i++) {
+    int dim = warpOrder[i];
+    // K dimension (dim1 for A, dim0 for B) is NOT partitioned across warps.
+    if ((opIdx == 0 && dim == 1) || (opIdx == 1 && dim == 0)) {
+      warpLayout *=
+          LinearLayout::zeros1D(warpsPerCTA[dim], kWarp, outDimNames[dim]);
+    } else {
+      warpLayout *=
+          LinearLayout::identity1D(warpsPerCTA[dim], kWarp, outDimNames[dim]);
+    }
+  }
+
+  LinearLayout ctaLayout = tileLayout * warpLayout;
+
+  // Apply CGALayout if needed, but for now just transpose to standard
+  return combineCtaCgaWithShape(ctaLayout, mma.getCGALayout(), shape)
+      .transposeOuts(outDimNames);
 }
 
 LinearLayout mfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
@@ -979,6 +1114,8 @@ DotOperandEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
     return mfmaDotToLinearLayout(*this, shape);
   } else if (auto wmmaLayout = mlir::dyn_cast<AMDWmmaEncodingAttr>(parent)) {
     return wmmaDotOperandToLinearLayout(*this, shape);
+  } else if (auto metalLayout = mlir::dyn_cast<MetalMfmaEncodingAttr>(parent)) {
+    return metalMfmaDotToLinearLayout(shape, *this);
   } else {
     auto mma = mlir::cast<NvidiaMmaEncodingAttr>(parent);
     return nvidiaDotToLinearLayout(shape, *this);

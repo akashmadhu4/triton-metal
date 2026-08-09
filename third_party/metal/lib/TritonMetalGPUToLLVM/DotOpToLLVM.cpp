@@ -11,11 +11,9 @@ LogicalResult convertMetalFMADot(triton::DotOp op,
                                  triton::DotOp::Adaptor adaptor,
                                  const LLVMTypeConverter *typeConverter,
                                  ConversionPatternRewriter &rewriter);
-LogicalResult convertSimdgroupMatmul(
+LogicalResult convertMetalMfmaDot(
     triton::DotOp op, triton::DotOp::Adaptor adaptor,
-    const LLVMTypeConverter *typeConverter, ConversionPatternRewriter &rewriter,
-    const DenseMap<int, std::array<Operation *, 2>> &dotAllocOps,
-    const mlir::triton::metal::TargetInfo &targetInfo);
+    const LLVMTypeConverter *typeConverter, ConversionPatternRewriter &rewriter);
 } // namespace mlir::triton::metal
 
 namespace {
@@ -34,13 +32,12 @@ struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
     Value D = op.getResult();
     auto dEncoding = cast<RankedTensorType>(D.getType()).getEncoding();
 
-    // if (isa<BlockedEncodingAttr>(dEncoding))
-    //   return metal::convertSimdgroupMatmul(op, adaptor, getTypeConverter(),
-    //                                        rewriter, dotAllocOps,
-    //                                        targetInfo);
+    if (isa<MetalMfmaEncodingAttr>(dEncoding)) {
+      return metal::convertMetalMfmaDot(op, adaptor, getTypeConverter(),
+                                        rewriter);
+    }
 
-    if (isa<BlockedEncodingAttr>(
-            cast<RankedTensorType>(D.getType()).getEncoding()))
+    if (isa<BlockedEncodingAttr>(dEncoding))
       return metal::convertMetalFMADot(op, adaptor, getTypeConverter(),
                                        rewriter);
 
