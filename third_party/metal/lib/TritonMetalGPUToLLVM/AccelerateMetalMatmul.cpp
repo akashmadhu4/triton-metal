@@ -10,6 +10,7 @@
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Tools/LinearLayout.h"
 #include <utility>
 
 namespace tt = mlir::triton;
@@ -123,17 +124,78 @@ public:
     auto mfmaEnc = ttg::MetalMfmaEncodingAttr::get(ctx, warpsPerTile, CGALayout,
                                                    instrShape);
 
-    // BlockedEncoding -> MetalMfmaEncoding.
+    // Helper: create a row-major SharedLinearEncoding + MemDescType
+    auto sharedMemSpace = ttg::SharedMemorySpaceAttr::get(ctx);
+    StringAttr kOffset = StringAttr::get(ctx, "offset");
+    StringAttr kBlock = StringAttr::get(ctx, "block");
+    StringAttr dim0 = StringAttr::get(ctx, "dim0");
+    StringAttr dim1 = StringAttr::get(ctx, "dim1");
+
+    static auto convertLayout = [&](PatternRewriter &rewriter, Value value,
+                                    Attribute newEncoding) {
+      auto oldType = cast<RankedTensorType>(value.getType());
+      auto newType = RankedTensorType::get(
+          oldType.getShape(), oldType.getElementType(), newEncoding);
+      return ttg::ConvertLayoutOp::create(rewriter, value.getLoc(), newType,
+                                          value);
+    };
+
+    auto makeSharedTy = [&](ArrayRef<int64_t> shape, Type eTy) {
+      int64_t M = shape[0], N = shape[1];
+      unsigned alignment = eTy.getIntOrFloatBitWidth() / 8;
+
+      // row major: offset = row * N + col
+      std::vector<std::vector<int32_t>> offsetBases;
+      for (int64_t i = 1; i < N; i *= 2)
+        offsetBases.push_back({0, (int32_t)i});
+      for (int64_t i = 1; i < M; i *= 2)
+        offsetBases.push_back({(int32_t)i, 0});
+
+      // single CTA, 0 basis vectors
+      std::vector<std::vector<int32_t>> blockBases = {};
+      StringAttr kOffset = StringAttr::get(ctx, "offset");
+      StringAttr kBlock = StringAttr::get(ctx, "block");
+      StringAttr dim0 = StringAttr::get(ctx, "dim0");
+      StringAttr dim1 = StringAttr::get(ctx, "dim1");
+
+      triton::LinearLayout ll({{kOffset, offsetBases}, {kBlock, blockBases}},
+                              {{dim0, (int32_t)M}, {dim1, (int32_t)N}},
+                              /*requireSurjective=*/true);
+      auto sharedMemSpace = ttg::SharedMemorySpaceAttr::get(ctx);
+      auto enc = ttg::SharedLinearEncodingAttr::get(ctx, ll, alignment);
+      return ttg::MemDescType::get(shape, eTy, enc, sharedMemSpace,
+                                   /*mutableMemory=*/true);
+    };
+
+    auto convertToSharedThenLoad = [&](Value value, Attribute newEncoding) {
+      auto tensorTy = cast<RankedTensorType>(value.getType());
+      auto sharedTy =
+          makeSharedTy(tensorTy.getShape(), tensorTy.getElementType());
+      auto alloc =
+          ttg::LocalAllocOp::create(rewriter, value.getLoc(), sharedTy, value);
+
+      auto loadedTy = RankedTensorType::get(
+          tensorTy.getShape(), tensorTy.getElementType(), newEncoding);
+      return ttg::LocalLoadOp::create(rewriter, value.getLoc(), loadedTy,
+                                      alloc);
+    };
+
+    // Create accumulator directly in #mma encoding.
+    // We use tt.splat(0) instead of convertLayout because convertLayout on a
+    // zero constant gets folded into arith.constant dense<0.0> with #mma
+    // encoding, which the generic LLVM lowering can't handle (it creates 64
+    // scalar zeros but our struct expects 32 vectors).
     auto oldAcc = dotOp.getC();
     auto newAcc = convertLayout(rewriter, oldAcc, mfmaEnc);
 
-    // BlockedEncoding -> DotOperandEncoding
+    // BlockedEncoding → Shared → DotOperandEncoding for A and B
     auto newAEnc = ttg::DotOperandEncodingAttr::get(ctx, /*opIdx=*/0, mfmaEnc,
                                                     kSimdgroupKWidth);
-    Value newA = convertLayout(rewriter, dotOp.getA(), newAEnc);
+    Value newA = convertToSharedThenLoad(dotOp.getA(), newAEnc);
+
     auto newBEnc = ttg::DotOperandEncodingAttr::get(ctx, /*opIdx=*/1, mfmaEnc,
                                                     kSimdgroupKWidth);
-    Value newB = convertLayout(rewriter, dotOp.getB(), newBEnc);
+    Value newB = convertToSharedThenLoad(dotOp.getB(), newBEnc);
 
     auto newRetType = RankedTensorType::get(retShape, elemType, mfmaEnc);
     Value newDot = tt::DotOp::create(rewriter, dotOp.getLoc(), newRetType, newA,
@@ -150,13 +212,15 @@ public:
 };
 
 struct TritonMetalGPUAccelerateMatmulPass
-    : triton::impl::TritonMetalGPUAccelerateMatmulBase<TritonMetalGPUAccelerateMatmulPass> {
+    : triton::impl::TritonMetalGPUAccelerateMatmulBase<
+          TritonMetalGPUAccelerateMatmulPass> {
   using Base::Base;
 
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
     patterns.add<BlockedToMetalMFMA>(context);
+
     if (applyPatternsGreedily(getOperation(), std::move(patterns)).failed())
       signalPassFailure();
   }
@@ -165,7 +229,8 @@ struct TritonMetalGPUAccelerateMatmulPass
 } // namespace
 
 namespace triton {
-std::unique_ptr<OperationPass<ModuleOp>> createTritonMetalGPUAccelerateMatmul() {
+std::unique_ptr<OperationPass<ModuleOp>>
+createTritonMetalGPUAccelerateMatmul() {
   return std::make_unique<TritonMetalGPUAccelerateMatmulPass>();
 }
 } // namespace triton

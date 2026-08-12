@@ -71,6 +71,10 @@ public:
       // the result must be a tensor
       return resultVals;
 
+    // We can only deduplicate if the number of elements in the struct matches the register dimension size
+    if (resultVals.size() != triton::gpu::getTotalElemsPerThread(rtType))
+      return resultVals;
+
     // Bail out if we don't have the constancy analysis
     AxisInfo *axisInfo = axisAnalysisPass.getAxisInfo(result);
     if (!axisInfo)
@@ -124,6 +128,11 @@ public:
     }
     if (allOperands.size() == 0)
       allOperands.push_back({});
+    else if (allOperands[0].size() > 0 && allOperands[0][0]) {
+      if (auto vecTy = dyn_cast<VectorType>(allOperands[0][0].getType())) {
+        elemTy = VectorType::get(vecTy.getShape(), elemTy);
+      }
+    }
 
     SmallVector<Value> resultVals;
     for (auto it = allOperands.begin(), end = allOperands.end(); it != end;) {

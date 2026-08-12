@@ -856,6 +856,45 @@ def rewrite_air_simdgroup_async_copy_ptrs(ir: str) -> str:
 
     return "\n".join(new_lines)
 
+def rewrite_air_simdgroup_load_ptrs(ir: str) -> str:
+    """
+    Rewrite opaque ptr addrspace args in air.simdgroup_matrix_8x8_load calls
+
+    Element type comes from function name suffix (e.g. .p3f32 -> float)
+    """
+    load_elem: dict[str, str] = {}
+    for m in re.finditer(
+        r"@(air\.simdgroup_matrix_8x8_load\.[^()\s]+)",
+        ir,
+    ):
+        func_name = m.group(1).strip()
+        if func_name in load_elem:
+            continue
+        ptr_m = re.search(r"\.p\d+(\w+)$", func_name)
+        if not ptr_m:
+            continue
+        llvm_type = _AIR_ELEM_TYPE_MAP.get(ptr_m.group(1))
+        if llvm_type:
+            load_elem[func_name] = llvm_type
+
+    if not load_elem:
+        return ir
+
+    new_lines = []
+    for line in ir.split("\n"):
+        for func_name, elem_type in load_elem.items():
+            if f"@{func_name}" not in line:
+                continue
+            # replace ptr addrspace(N) with elem_type addrspace(N)* for any N
+            line = re.sub(
+                r"\bptr\s+addrspace\((\d+)\)",
+                lambda mo, et=elem_type: f"{et} addrspace({mo.group(1)})*",
+                line,
+            )
+        new_lines.append(line)
+
+    return "\n".join(new_lines)
+
 
 def rewrite_air_simdgroup_store_ptrs(ir: str) -> str:
     """
@@ -1257,6 +1296,7 @@ def convert_opaque_ptrs_to_typed(ir: str) -> str:
 
     # rewrite opaque ptrs in air.simdgroup_matrix_8x8_* load declarations
     ir = rewrite_air_simdgroup_decl_ptrs(ir)
+    ir = rewrite_air_simdgroup_load_ptrs(ir)
 
     # rewrite ptr addrspace args in store declarations/calls (addrspace from call
     # site, elem type from function name suffix)

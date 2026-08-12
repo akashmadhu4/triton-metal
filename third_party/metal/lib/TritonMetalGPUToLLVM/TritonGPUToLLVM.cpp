@@ -139,6 +139,25 @@ struct ConvertTritonMetalGPUToLLVM
     option.overrideIndexBitwidth(32);
 
     TritonGPUToLLVMTypeConverter typeConverter(context, option, targetInfo);
+    
+    // Add custom type conversion for MetalMfmaEncodingAttr to use <64 x type> vectors
+    typeConverter.addConversion([&](RankedTensorType type) -> std::optional<Type> {
+      auto enc = type.getEncoding();
+      bool isMfma = mlir::isa_and_nonnull<triton::gpu::MetalMfmaEncodingAttr>(enc);
+      if (auto dot = mlir::dyn_cast_or_null<triton::gpu::DotOperandEncodingAttr>(enc)) {
+        isMfma = mlir::isa_and_nonnull<triton::gpu::MetalMfmaEncodingAttr>(dot.getParent());
+      }
+      
+      if (isMfma) {
+        auto ctx = type.getContext();
+        Type eltType = typeConverter.convertType(type.getElementType());
+        Type vecTy = mlir::VectorType::get({64}, eltType);
+        int numTiles = triton::gpu::getTotalElemsPerThread(type) / 2;
+        SmallVector<Type, 4> types(numTiles, vecTy);
+        return LLVM::LLVMStructType::getLiteral(ctx, types);
+      }
+      return std::nullopt; // fallback to generic conversion
+    });
     TritonLLVMConversionTarget convTarget(*context);
 
     // TODO skip shared memory for now just to get vector add example working
@@ -178,6 +197,8 @@ struct ConvertTritonMetalGPUToLLVM
 
     mlir::triton::populateConvertLayoutOpToLLVMPatterns(
         typeConverter, targetInfo, patterns, benefit);
+    metal::populateConvertLayoutOpToLLVMPatterns(
+        typeConverter, targetInfo, patterns, benefit + 10);
     metal::populateSimdgroupAsyncCopyOpToLLVMPatterns(typeConverter, patterns,
                                                       targetInfo, benefit);
     metal::populateDotOpToLLVMPatterns(typeConverter, patterns,

@@ -87,8 +87,11 @@ class MetalBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
 
+        metal.passes.ttgpuir.add_accelerate_matmul(pm)
+        passes.ttgpuir.add_remove_layout_conversions(pm)
+        #passes.common.add_canonicalizer(pm)
         metal.passes.ttgpuir.add_inject_tensor_stride_args(pm)
-        metal.passes.ttgpuir.add_prepare_simdgroup_matmul(pm)
+        # metal.passes.ttgpuir.add_prepare_simdgroup_matmul(pm)
         pm.run(mod, "make_ttgir")
         metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
         return mod
@@ -137,6 +140,9 @@ class MetalBackend(BaseBackend):
 
         # add metadata
         metal.add_kernel_metadata(llvm_mod)
+
+        with open("/tmp/debug_pre_air.ll", "w") as f:
+            f.write(str(llvm_mod))
 
         ret = str(llvm_mod)
 

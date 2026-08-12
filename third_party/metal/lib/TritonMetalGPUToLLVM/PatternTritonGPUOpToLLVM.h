@@ -58,6 +58,10 @@ void populateSimdgroupStoreOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     const mlir::triton::metal::TargetInfo &targetInfo, PatternBenefit benefit);
 
+void populateConvertLayoutOpToLLVMPatterns(
+    LLVMTypeConverter &typeConverter, const TargetInfo &targetInfo,
+    RewritePatternSet &patterns, PatternBenefit benefit);
+
 } // namespace mlir::triton::metal
 
 #endif // TRITON_THIRD_PARTY_METAL_LIB_TRITONMETALGPUTOLLVM_PATTERNTRITONGPUOPTOLLVM_H_

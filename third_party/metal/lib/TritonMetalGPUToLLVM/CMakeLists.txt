@@ -8,6 +8,7 @@ add_triton_library(TritonMetalGPUToLLVM
     ElementwiseOpToLLVM.cpp
     LoadStoreOpToLLVM.cpp
     Utility.cpp
+    ConvertLayoutOpToLLVM.cpp
     GPUIdxOpsToLLVM.cpp
     SPMDOpToLLVM.cpp
     DotOpToLLVM.cpp

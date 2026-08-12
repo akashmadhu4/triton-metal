@@ -494,32 +494,20 @@ LogicalResult convertMetalMfmaDot(
   
   for (int m = 0; m < repsM; ++m) {
     for (int n = 0; n < repsN; ++n) {
-      Value accVec = b.undef(vec64Ty);
-      for (int r = 0; r < 2; ++r) {
-        int cIdx = r + 2 * (n + repsN * m);
-        accVec = LLVM::InsertElementOp::create(rewriter, loc, typeConverter->convertType(vec64Ty), accVec, cElems[cIdx], b.i32_val(r));
-      }
+      int cIdx = n + repsN * m;
+      Value accVec = cElems[cIdx];
       
       for (int k = 0; k < repsK; ++k) {
-        Value aVec = b.undef(vec64TyA);
-        for (int r = 0; r < 2; ++r) {
-          int aIdx = r + 2 * (k + repsK * m);
-          aVec = LLVM::InsertElementOp::create(rewriter, loc, typeConverter->convertType(vec64TyA), aVec, aElems[aIdx], b.i32_val(r));
-        }
+        int aIdx = k + repsK * m;
+        Value aVec = aElems[aIdx];
         
-        Value bVec = b.undef(vec64TyB);
-        for (int r = 0; r < 2; ++r) {
-          int bIdx = r + 2 * (n + repsN * k);
-          bVec = LLVM::InsertElementOp::create(rewriter, loc, typeConverter->convertType(vec64TyB), bVec, bElems[bIdx], b.i32_val(r));
-        }
+        int bIdx = n + repsN * k;
+        Value bVec = bElems[bIdx];
         
         accVec = LLVM::createLLVMCallOp(rewriter, loc, funcOp, ValueRange{aVec, bVec, accVec}).getResult();
       }
       
-      for (int r = 0; r < 2; ++r) {
-        int cIdx = r + 2 * (n + repsN * m);
-        dElems[cIdx] = LLVM::ExtractElementOp::create(rewriter, loc, typeConverter->convertType(dElemTy), accVec, b.i32_val(r));
-      }
+      dElems[cIdx] = accVec;
     }
   }
 
