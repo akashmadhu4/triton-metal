@@ -42,6 +42,35 @@ struct BarrierOpConversion
   }
 };
 
+struct TritonBarrierOpConversion
+    : public ConvertOpToLLVMPattern<mlir::triton::gpu::BarrierOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(mlir::triton::gpu::BarrierOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    MLIRContext *ctx = rewriter.getContext();
+
+    auto voidTy = LLVM::LLVMVoidType::get(ctx);
+    auto i32Ty = IntegerType::get(ctx, 32);
+    auto funcTy = LLVM::LLVMFunctionType::get(voidTy, {i32Ty, i32Ty});
+
+    Operation *parentOp = rewriter.getInsertionBlock()->getParentOp();
+    LLVM::LLVMFuncOp funcOp =
+        appendOrGetExternFuncOp(rewriter, parentOp, "air.wg.barrier", funcTy);
+    funcOp.setCConv(LLVM::CConv::C);
+
+    Value memFlags =
+        LLVM::createConstantI32(loc, rewriter, kAirMemFlagsThreadgroup);
+    Value scope = LLVM::createConstantI32(loc, rewriter, kAirScopeThreadgroup);
+    LLVM::createLLVMCallOp(rewriter, loc, funcOp, ValueRange{memFlags, scope});
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
 } // namespace
 
 namespace mlir::triton::metal {
@@ -50,6 +79,7 @@ void populateBarrierOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                      RewritePatternSet &patterns,
                                      PatternBenefit benefit) {
   patterns.add<BarrierOpConversion>(typeConverter, benefit);
+  patterns.add<TritonBarrierOpConversion>(typeConverter, benefit);
 }
 
 } // namespace mlir::triton::metal

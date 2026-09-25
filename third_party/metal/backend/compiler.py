@@ -83,16 +83,32 @@ class MetalBackend(BaseBackend):
         pm.enable_debug()
         # TODO what to put for architecture label
         passes.ttir.add_convert_to_ttgpuir(pm, "metal", options.num_warps, options.warp_size, options.num_ctas)
+        # optimize TTGIR
+        passes.ttgpuir.add_coalesce(pm)
         pm.run(mod, "make_ttgir_early")
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
 
         metal.passes.ttgpuir.add_accelerate_matmul(pm)
         passes.ttgpuir.add_remove_layout_conversions(pm)
-        #passes.common.add_canonicalizer(pm)
+        passes.common.add_canonicalizer(pm)
+        
+        # We must assign latencies and schedule the loops before calling the pipeliner!
+        # Otherwise, schedule.deSerialize(forOp) fails and the loop is skipped!
+        #print(f"Assigning latencies with num_stages={options.num_stages}")
+        passes.ttgpuir.add_assign_latencies(pm, options.num_stages)
+        passes.ttgpuir.add_schedule_loops(pm)
+        
+        # Enable the generic pipeliner!
+        # Note: the pipeliner creates async_copy_global_to_local
+        passes.ttgpuir.add_pipeline(pm, options.num_stages, False)
+        
+        # Run stride injection AFTER pipeliner so it can annotate async_copy_global_to_local ops
+        # while the loops are still intact scf.for loops (before LLVM lowering breaks them).
         metal.passes.ttgpuir.add_inject_tensor_stride_args(pm)
-        # metal.passes.ttgpuir.add_prepare_simdgroup_matmul(pm)
-        pm.run(mod, "make_ttgir")
+
+        passes.ttgpuir.add_allocate_shared_memory(pm)
+        pm.run(mod, "make_ttgir_pipeline")
         metadata["tensordesc_meta"] = mod.get_tensordesc_metadata()
         return mod
 
@@ -195,12 +211,29 @@ class MetalBackend(BaseBackend):
 
             with open(air_path, "w") as f:
                 f.write(src)
+            with open("/tmp/kernel_dump.ll", "w") as f:
+                f.write(src)
 
             # ir -> metallib
             result = subprocess.run(
                 ["xcrun", "metal", "-x", "ir", air_path, "-o", lib_path], capture_output=True, text=True
             )
             if result.returncode != 0:
+                with open(air_path, "r") as f:
+                    ir_content = f.read()
+                    print("--- KERNEL LL DUMP ---")
+                    lines = ir_content.splitlines()
+                    for i, line in enumerate(lines):
+                        if "ptrtoint" in line or "air.simdgroup_async_copy_2d" in line:
+                            print(f"{i-5}:\t{lines[i-5]}")
+                            print(f"{i-4}:\t{lines[i-4]}")
+                            print(f"{i-3}:\t{lines[i-3]}")
+                            print(f"{i-2}:\t{lines[i-2]}")
+                            print(f"{i-1}:\t{lines[i-1]}")
+                            print(f"{i}:\t{line}")
+                            print(f"{i+1}:\t{lines[i+1]}")
+                            print(f"{i+2}:\t{lines[i+2]}")
+                            break
                 raise RuntimeError(f"metal compiler failed: {result.stderr}")
             with open(lib_path, "rb") as f:
                 return f.read()

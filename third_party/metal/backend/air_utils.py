@@ -621,7 +621,7 @@ def rewrite_simdgroup_wait_ptrs(ir: str) -> str:
     gep_source: dict[str, str] = {}  # gep_var -> alloca_var
     for line in lines:
         m = re.search(
-            r"(%\w+)\s*=\s*getelementptr\s+(?:inbounds\s+)?\[(\d+)\s+x\s+ptr\],\s+ptr\s+(%\w+),\s+i\d+\s+0,\s+i\d+\s+\d+",
+            r"(%\w+)\s*=\s*getelementptr\s+(?:inbounds\s+)?\[(\d+)\s+x\s+ptr\],\s+ptr\s+(%\w+),\s+i\d+\s+0,\s+i\d+\s+(?:\d+|%\w+)",
             line,
         )
         if m and m.group(3) in alloca_vars:
@@ -671,7 +671,7 @@ def rewrite_simdgroup_wait_ptrs(ir: str) -> str:
         # store ptr %event, ptr %slot -> typed store
         def rewrite_store(m):
             prefix, val_var, dst_var, rest = m.group(1), m.group(2), m.group(3), m.group(4)
-            if val_var in event_vars and dst_var in event_gep_vars:
+            if val_var in event_vars:
                 return f"{prefix}store {event_ptr_ty} {val_var}, {event_ptr_ptr_ty} {dst_var}{rest}"
             return m.group(0)
 
@@ -684,12 +684,10 @@ def rewrite_simdgroup_wait_ptrs(ir: str) -> str:
         # call void @air.wait_simdgroup_events(i32 N, ptr %slot0)
         def rewrite_wait(m):
             n_arg, slot_var = m.group(1), m.group(2)
-            if slot_var in event_gep_vars:
-                return f"call void @air.wait_simdgroup_events(i32 {n_arg}, {event_ptr_ptr_ty} {slot_var})"
-            return m.group(0)
+            return f"call void @air.wait_simdgroup_events(i32 {n_arg}, {event_ptr_ptr_ty} {slot_var})"
 
         line = re.sub(
-            r"call\s+void\s+@air\.wait_simdgroup_events\s*\(i32\s+(\w+),\s+ptr\s+(%\w+)\)",
+            r"call\s+void\s+@air\.wait_simdgroup_events\s*\(i32\s+([^,]+),\s+ptr\s+(%\w+)\)",
             rewrite_wait,
             line,
         )

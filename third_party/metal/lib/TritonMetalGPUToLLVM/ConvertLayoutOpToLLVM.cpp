@@ -175,6 +175,10 @@ struct ConvertSharedToMetalMfma
     if (basePtr.getType() != p3Ty)
       basePtr = LLVM::AddrSpaceCastOp::create(rewriter, loc, p3Ty, basePtr);
 
+    // Add subview offset for pipelining
+    Value smemOffset = smemObj.getShmemOffset(loc, rewriter, srcTy);
+    basePtr = b.gep(p3Ty, typeConverter->convertType(elemTy), basePtr, smemOffset);
+
     // Stride for simdgroup_load = number of columns (leading dimension for
     // row-major)
     Value stride = b.i32_val(srcTy.getShape()[1]);
@@ -195,9 +199,19 @@ struct ConvertSharedToMetalMfma
     Value warpId = getLaneAndWarpId(rewriter, loc).second;
 
     Value numWarps0Val = b.i32_val(numWarps0);
-    Value warpId0 = (opIdx == 0) ? b.urem(warpId, numWarps0Val) : b.i32_val(0);
-    Value warpId1 =
-        (opIdx == 0) ? b.i32_val(0) : b.udiv(warpId, b.i32_val(warpsPerCTA[0]));
+    Value warpId0;
+    if (opIdx == 1) {
+      warpId0 = b.i32_val(0);
+    } else {
+      warpId0 = b.urem(warpId, b.i32_val(warpsPerCTA[0]));
+    }
+    
+    Value warpId1;
+    if (opIdx == 0) {
+      warpId1 = b.i32_val(0);
+    } else {
+      warpId1 = b.udiv(warpId, b.i32_val(warpsPerCTA[0]));
+    }
 
     SmallVector<Value> loadedVectors;
     Operation *parentOp = rewriter.getInsertionBlock()->getParentOp();
@@ -205,9 +219,9 @@ struct ConvertSharedToMetalMfma
     for (int r0 = 0; r0 < reps0; r0++) {
       for (int r1 = 0; r1 < reps1; r1++) {
         Value row =
-            b.mul(b.add(warpId0, b.i32_val(r0 * numWarps0)), b.i32_val(8));
+            b.add(b.i32_val(r0 * 8), b.mul(warpId0, b.i32_val(shapePerWarp0)));
         Value col =
-            b.mul(b.add(warpId1, b.i32_val(r1 * numWarps1)), b.i32_val(8));
+            b.add(b.i32_val(r1 * 8), b.mul(warpId1, b.i32_val(shapePerWarp1)));
 
         bool transpose = false;
         Value vec = emitLoad(rewriter, loc, parentOp, basePtr, stride, col, row,
@@ -299,9 +313,9 @@ struct ConvertMetalMfmaToShared
     for (int r0 = 0; r0 < reps0; r0++) {
       for (int r1 = 0; r1 < reps1; r1++) {
         Value row =
-            b.mul(b.add(warpId0, b.i32_val(r0 * numWarps0)), b.i32_val(8));
+            b.add(b.i32_val(r0 * 8), b.mul(warpId0, b.i32_val(shapePerWarp0)));
         Value col =
-            b.mul(b.add(warpId1, b.i32_val(r1 * numWarps1)), b.i32_val(8));
+            b.add(b.i32_val(r1 * 8), b.mul(warpId1, b.i32_val(shapePerWarp1)));
 
         Value vec = LLVM::ExtractValueOp::create(rewriter, loc,
                                                  adaptor.getSrc(), structIdx++);
@@ -384,11 +398,18 @@ struct ConvertLayoutOpToMetalMfma
         triton::gpu::MemDescType::get(srcTy.getShape(), srcTy.getElementType(),
                                       sharedEnc, sharedMemSpace, true);
 
+    // Insert a barrier before alloc to ensure previous loads from shared memory have finished.
+    triton::gpu::BarrierOp::create(rewriter, loc, triton::gpu::AddrSpace::Local);
     auto alloc =
         triton::gpu::LocalAllocOp::create(rewriter, loc, sharedTy, op.getSrc());
     if (op->hasAttr("allocation.offset")) {
       alloc->setAttr("allocation.offset", op->getAttr("allocation.offset"));
     }
+    
+    // MembarAnalysis misses ConvertLayoutOp because it is Pure. We must manually
+    // insert a barrier to prevent race conditions during layout conversion through shared memory.
+    triton::gpu::BarrierOp::create(rewriter, loc, triton::gpu::AddrSpace::Local);
+    
     auto load = triton::gpu::LocalLoadOp::create(rewriter, loc, dstTy, alloc);
 
     rewriter.replaceOp(op, load.getResult());

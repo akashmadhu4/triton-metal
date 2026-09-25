@@ -64,21 +64,17 @@ struct SplatOpConversion : public ConvertOpToLLVMPattern<triton::SplatOp> {
     } else {
       llSrc = bitOrPtrCast(constVal, srcType, b);
     }
-    
+
     size_t elemsPerThread = getTotalElemsPerThread(tensorTy);
-    bool isMfma = mlir::isa_and_nonnull<MetalMfmaEncodingAttr>(tensorTy.getEncoding());
-    if (auto dot = mlir::dyn_cast_or_null<DotOperandEncodingAttr>(tensorTy.getEncoding())) {
+    bool isMfma =
+        mlir::isa_and_nonnull<MetalMfmaEncodingAttr>(tensorTy.getEncoding());
+    if (auto dot = mlir::dyn_cast_or_null<DotOperandEncodingAttr>(
+            tensorTy.getEncoding())) {
       isMfma = mlir::isa_and_nonnull<MetalMfmaEncodingAttr>(dot.getParent());
     }
-    
-    llvm::errs() << "SPLAT OP ENCODING: " << tensorTy.getEncoding() << "\n";
-    llvm::errs() << "IS_MFMA: " << isMfma << ", ELEMS_PER_THREAD BEFORE: " << elemsPerThread << "\n";
-    
     if (isMfma) {
       elemsPerThread = elemsPerThread / 2;
     }
-    llvm::errs() << "ELEMS_PER_THREAD AFTER: " << elemsPerThread << "\n";
-    
     llvm::SmallVector<Value> elemsList(elemsPerThread, llSrc);
     return packLLElements(loc, typeConverter, elemsList, rewriter, resType);
   }

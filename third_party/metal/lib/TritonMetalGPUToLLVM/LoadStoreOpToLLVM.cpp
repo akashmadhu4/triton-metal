@@ -4,6 +4,7 @@
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/IR/PatternMatch.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
+#include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 
 using namespace mlir;
@@ -570,6 +571,8 @@ struct AtomicRMWOpConversion
   }
 };
 
+
+
 } // namespace
 
 namespace mlir::triton::metal {
@@ -579,7 +582,9 @@ void populateLoadStoreOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                        ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                        PatternBenefit benefit) {
   patterns.add<LoadOpConversion, StoreOpConversion, AtomicCASOpConversion,
-               AtomicRMWOpConversion>(typeConverter, targetInfo,
-                                      axisInfoAnalysis, benefit);
+               AtomicRMWOpConversion>(
+      typeConverter, targetInfo, axisInfoAnalysis, benefit);
 }
+
+
 } // namespace mlir::triton::metal

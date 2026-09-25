@@ -342,9 +342,9 @@ struct DotOpSimdgroupMatmulConversionHelper {
 
         // emit code to compute output row and column for this 8x8 tile
         Value tileRow =
-            b.udiv(flatTileIdx, b.i64_val(warpItersNeededPerDim[0]));
+            b.udiv(flatTileIdx, b.i64_val(warpItersNeededPerDim[1]));
         Value tileCol =
-            b.urem(flatTileIdx, b.i64_val(warpItersNeededPerDim[0]));
+            b.urem(flatTileIdx, b.i64_val(warpItersNeededPerDim[1]));
         tileRow = b.mul(tileRow, b.i64_val(warpCoverage[0]));
         tileCol = b.mul(tileCol, b.i64_val(warpCoverage[1]));
 
@@ -448,9 +448,10 @@ LogicalResult convertSimdgroupMatmul(
   return helper.convertDot(op, adaptor);
 }
 
-LogicalResult convertMetalMfmaDot(
-    triton::DotOp op, triton::DotOp::Adaptor adaptor,
-    const LLVMTypeConverter *typeConverter, ConversionPatternRewriter &rewriter) {
+LogicalResult convertMetalMfmaDot(triton::DotOp op,
+                                  triton::DotOp::Adaptor adaptor,
+                                  const LLVMTypeConverter *typeConverter,
+                                  ConversionPatternRewriter &rewriter) {
   auto loc = op.getLoc();
   auto *ctx = op.getContext();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
@@ -467,12 +468,12 @@ LogicalResult convertMetalMfmaDot(
   auto warpsPerCTA = dEncoding.getWarpsPerCTA();
   int repsM = std::max<int>(1, dTensorTy.getShape()[0] / (warpsPerCTA[0] * 8));
   int repsN = std::max<int>(1, dTensorTy.getShape()[1] / (warpsPerCTA[1] * 8));
-  int repsK = std::max<int>(1, aTensorTy.getShape()[1] / 8); 
+  int repsK = std::max<int>(1, aTensorTy.getShape()[1] / 8);
 
   Type aElemTy = aTensorTy.getElementType();
   Type bElemTy = cast<RankedTensorType>(op.getB().getType()).getElementType();
   Type dElemTy = dTensorTy.getElementType();
-  
+
   VectorType vec64Ty = VectorType::get({64}, dElemTy);
   VectorType vec64TyA = VectorType::get({64}, aElemTy);
   VectorType vec64TyB = VectorType::get({64}, bElemTy);
@@ -480,38 +481,43 @@ LogicalResult convertMetalMfmaDot(
   std::string inSuffix = getElemSuffix(aElemTy);
   std::string outSuffix = getElemSuffix(dElemTy);
   std::string funcName = "air.simdgroup_matrix_8x8_multiply_accumulate.v64" +
-                    outSuffix + ".v64" + inSuffix + ".v64" + inSuffix + ".v64" +
-                    outSuffix;
-                    
-  auto funcType = LLVM::LLVMFunctionType::get(
-    typeConverter->convertType(vec64Ty),
-    {typeConverter->convertType(vec64TyA), typeConverter->convertType(vec64TyB), typeConverter->convertType(vec64Ty)}
-  );
+                         outSuffix + ".v64" + inSuffix + ".v64" + inSuffix +
+                         ".v64" + outSuffix;
+
+  auto funcType =
+      LLVM::LLVMFunctionType::get(typeConverter->convertType(vec64Ty),
+                                  {typeConverter->convertType(vec64TyA),
+                                   typeConverter->convertType(vec64TyB),
+                                   typeConverter->convertType(vec64Ty)});
   Operation *parentOp = rewriter.getInsertionBlock()->getParentOp();
-  auto funcOp = getOrCreateSimdgroupFunc(rewriter, parentOp, funcName, funcType);
+  auto funcOp =
+      getOrCreateSimdgroupFunc(rewriter, parentOp, funcName, funcType);
 
   SmallVector<Value> dElems(cElems.size());
-  
+
   for (int m = 0; m < repsM; ++m) {
     for (int n = 0; n < repsN; ++n) {
       int cIdx = n + repsN * m;
       Value accVec = cElems[cIdx];
-      
+
       for (int k = 0; k < repsK; ++k) {
         int aIdx = k + repsK * m;
         Value aVec = aElems[aIdx];
-        
+
         int bIdx = n + repsN * k;
         Value bVec = bElems[bIdx];
-        
-        accVec = LLVM::createLLVMCallOp(rewriter, loc, funcOp, ValueRange{aVec, bVec, accVec}).getResult();
+
+        accVec = LLVM::createLLVMCallOp(rewriter, loc, funcOp,
+                                        ValueRange{aVec, bVec, accVec})
+                     .getResult();
       }
-      
+
       dElems[cIdx] = accVec;
     }
   }
 
-  Value result = packLLElements(loc, typeConverter, dElems, rewriter, dTensorTy);
+  Value result =
+      packLLElements(loc, typeConverter, dElems, rewriter, dTensorTy);
   rewriter.replaceOp(op, result);
   return success();
 }

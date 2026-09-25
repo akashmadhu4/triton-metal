@@ -79,8 +79,9 @@ public:
 
   LogicalResult matchAndRewrite(tt::DotOp dotOp,
                                 PatternRewriter &rewriter) const override {
-    RankedTensorType oldRetType = dotOp.getType();
-
+    auto oldRetType = dyn_cast<RankedTensorType>(dotOp.getType());
+    if (!oldRetType)
+      return failure();
     // only rewrite if result is BlockedEncoding
     if (!isa_and_nonnull<ttg::BlockedEncodingAttr>(oldRetType.getEncoding()))
       return rewriter.notifyMatchFailure(dotOp,
@@ -107,8 +108,12 @@ public:
     if (blockM % 8 != 0 || blockN % 8 != 0)
       return rewriter.notifyMatchFailure(
           dotOp, "BLOCK_M and BLOCK_N must be divisible by 8");
+    auto aTensorTy = dyn_cast<RankedTensorType>(dotOp.getA().getType());
+    auto bTensorTy = dyn_cast<RankedTensorType>(dotOp.getB().getType());
+    auto cTensorTy = dyn_cast<RankedTensorType>(dotOp.getC().getType());
+    if (!aTensorTy || !bTensorTy || !cTensorTy)
+      return failure();
 
-    auto aTensorTy = cast<RankedTensorType>(dotOp.getA().getType());
     int64_t blockK = aTensorTy.getShape()[1];
     if (blockK % 8 != 0) {
       return rewriter.notifyMatchFailure(dotOp,
@@ -167,16 +172,18 @@ public:
                                    /*mutableMemory=*/true);
     };
 
-    auto convertToSharedThenLoad = [&](Value value, Attribute newEncoding) {
+    auto convertToShared = [&](Value value) {
       auto tensorTy = cast<RankedTensorType>(value.getType());
       auto sharedTy =
           makeSharedTy(tensorTy.getShape(), tensorTy.getElementType());
-      auto alloc =
-          ttg::LocalAllocOp::create(rewriter, value.getLoc(), sharedTy, value);
+      return ttg::LocalAllocOp::create(rewriter, value.getLoc(), sharedTy, value);
+    };
 
+    auto loadFromShared = [&](Value alloc, Attribute newEncoding) {
+      auto memDescTy = cast<ttg::MemDescType>(alloc.getType());
       auto loadedTy = RankedTensorType::get(
-          tensorTy.getShape(), tensorTy.getElementType(), newEncoding);
-      return ttg::LocalLoadOp::create(rewriter, value.getLoc(), loadedTy,
+          memDescTy.getShape(), memDescTy.getElementType(), newEncoding);
+      return ttg::LocalLoadOp::create(rewriter, alloc.getLoc(), loadedTy,
                                       alloc);
     };
 
@@ -191,11 +198,19 @@ public:
     // BlockedEncoding → Shared → DotOperandEncoding for A and B
     auto newAEnc = ttg::DotOperandEncodingAttr::get(ctx, /*opIdx=*/0, mfmaEnc,
                                                     kSimdgroupKWidth);
-    Value newA = convertToSharedThenLoad(dotOp.getA(), newAEnc);
-
     auto newBEnc = ttg::DotOperandEncodingAttr::get(ctx, /*opIdx=*/1, mfmaEnc,
                                                     kSimdgroupKWidth);
-    Value newB = convertToSharedThenLoad(dotOp.getB(), newBEnc);
+
+    // Insert a barrier before writing to shared memory to prevent WAR hazards
+    // from previous iteration's loads (like C accumulator loads).
+    triton::gpu::BarrierOp::create(rewriter, dotOp.getLoc(), triton::gpu::AddrSpace::Local);
+    Value allocA = convertToShared(dotOp.getA());
+    Value allocB = convertToShared(dotOp.getB());
+
+    triton::gpu::BarrierOp::create(rewriter, dotOp.getLoc(), triton::gpu::AddrSpace::Local);
+
+    Value newA = loadFromShared(allocA, newAEnc);
+    Value newB = loadFromShared(allocB, newBEnc);
 
     auto newRetType = RankedTensorType::get(retShape, elemType, mfmaEnc);
     Value newDot = tt::DotOp::create(rewriter, dotOp.getLoc(), newRetType, newA,
