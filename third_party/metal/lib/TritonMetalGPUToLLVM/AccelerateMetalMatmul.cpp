@@ -176,7 +176,8 @@ public:
       auto tensorTy = cast<RankedTensorType>(value.getType());
       auto sharedTy =
           makeSharedTy(tensorTy.getShape(), tensorTy.getElementType());
-      return ttg::LocalAllocOp::create(rewriter, value.getLoc(), sharedTy, value);
+      return ttg::LocalAllocOp::create(rewriter, value.getLoc(), sharedTy,
+                                       value);
     };
 
     auto loadFromShared = [&](Value alloc, Attribute newEncoding) {
@@ -203,11 +204,13 @@ public:
 
     // Insert a barrier before writing to shared memory to prevent WAR hazards
     // from previous iteration's loads (like C accumulator loads).
-    triton::gpu::BarrierOp::create(rewriter, dotOp.getLoc(), triton::gpu::AddrSpace::Local);
+    // triton::gpu::BarrierOp::create(rewriter, dotOp.getLoc(),
+    // triton::gpu::AddrSpace::Local);
     Value allocA = convertToShared(dotOp.getA());
     Value allocB = convertToShared(dotOp.getB());
 
-    triton::gpu::BarrierOp::create(rewriter, dotOp.getLoc(), triton::gpu::AddrSpace::Local);
+    // triton::gpu::BarrierOp::create(rewriter, dotOp.getLoc(),
+    // triton::gpu::AddrSpace::Local);
 
     Value newA = loadFromShared(allocA, newAEnc);
     Value newB = loadFromShared(allocB, newBEnc);

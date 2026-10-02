@@ -261,7 +261,9 @@ struct AsyncCopyGlobalToLocalOpConversion
     auto ptrTy = cast<mlir::triton::PointerType>(srcTensorTy.getElementType());
     Type elemTy = ptrTy.getPointeeType();
 
-    auto dstMemDescTy = cast<MemDescType>(op.getResult().getType());
+    // The destination operand is awkwardly named 'result' in ODS, which causes
+    // op.getResult() to clash and return the token output instead. We use getOperand(1).
+    auto dstMemDescTy = cast<MemDescType>(op.getOperand(1).getType());
     ArrayRef<int64_t> tileShape = dstMemDescTy.getShape();
 
     auto srcPtrs = unpackLLElements(loc, adaptor.getSrc(), rewriter);
@@ -319,7 +321,7 @@ struct AsyncCopyGlobalToLocalOpConversion
     auto p0Ty = LLVM::LLVMPointerType::get(ctx, 0);
     Value isSimdgroup0 = b.icmp_eq(simdgroupIdInThreadgroup, b.i32_val(0));
     auto *curBlock = rewriter.getInsertionBlock();
-    auto *afterBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
+    auto *afterBlock = rewriter.splitBlock(curBlock, rewriter.getInsertionPoint());
     auto *thenBlock = rewriter.createBlock(afterBlock);
     auto *elseBlock = rewriter.createBlock(afterBlock);
 
@@ -386,8 +388,7 @@ struct AsyncCommitGroupOpConversion
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto i32Ty = IntegerType::get(ctx, 32);
 
-    Operation *parentOp = rewriter.getInsertionBlock()->getParentOp();
-    LLVM::LLVMFuncOp func = parentOp->getParentOfType<LLVM::LLVMFuncOp>();
+    LLVM::LLVMFuncOp func = op->getParentOfType<LLVM::LLVMFuncOp>();
     auto arrTy = LLVM::LLVMArrayType::get(i32Ty, 16);
     Value groupSizeQueue = getOrCreateQueueAlloca(rewriter, loc, func,
                                                   "groupSizeQueue", arrTy, i32Ty, 16);
@@ -450,7 +451,7 @@ struct AsyncWaitOpConversion
     Value isSimdgroup0 = b.icmp_eq(simdgroupIdInThreadgroup, b.i32_val(0));
 
     auto *curBlock = rewriter.getInsertionBlock();
-    auto *afterBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
+    auto *afterBlock = rewriter.splitBlock(curBlock, rewriter.getInsertionPoint());
     auto *thenBlock = rewriter.createBlock(afterBlock);
 
     rewriter.setInsertionPointToEnd(curBlock);
@@ -477,6 +478,7 @@ struct AsyncWaitOpConversion
     auto *doWaitBlock = rewriter.createBlock(afterBlock);
     auto *loopEndBlock = rewriter.createBlock(afterBlock);
 
+    rewriter.setInsertionPointToEnd(thenBlock);
     LLVM::BrOp::create(rewriter, loc, condBlock);
 
     rewriter.setInsertionPointToStart(condBlock);
